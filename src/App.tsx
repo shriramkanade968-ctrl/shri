@@ -1,711 +1,383 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
-import { TrafficCanvas } from './components/TrafficCanvas';
-import { ControllerPanel } from './components/ControllerPanel';
-import { RLAgentTelemetry } from './components/RLAgentTelemetry';
-import { PerformanceComparison } from './components/PerformanceComparison';
-import { TheoryAndArchitecture } from './components/TheoryAndArchitecture';
-import { PythonCodeViewer } from './components/PythonCodeViewer';
+import { EmergencyCodeBanner } from './components/EmergencyCodeBanner';
+import { DashboardOverview } from './components/DashboardOverview';
+import { PatientTriageBoard } from './components/PatientTriageBoard';
+import { PatientDetailModal } from './components/PatientDetailModal';
+import { AmbulanceDispatchMonitor } from './components/AmbulanceDispatchMonitor';
+import { DisasterMciModule } from './components/DisasterMciModule';
+import { ResourceInventory } from './components/ResourceInventory';
+import { ClinicalProtocolsView } from './components/ClinicalProtocolsView';
+import { EmergencyCodeModal } from './components/EmergencyCodeModal';
 import {
-  Vehicle,
-  TrafficPhase,
-  ControllerMode,
-  TrafficScenario,
-  IntersectionMetrics,
-  MetricHistoryPoint,
-  RLHyperparameters,
-  RLTelemetry,
-  Direction
-} from './types/traffic';
+  EmergencyPatient,
+  HospitalCapacity,
+  AmbulanceUnit,
+  BloodInventoryItem,
+  ActiveEmergencyCode,
+  EsiLevel
+} from './types/hems';
 import {
-  CANVAS_SIZE,
-  ROAD_WIDTH,
-  LANE_WIDTH,
-  CENTER,
-  STOP_LINES,
-  createVehicle,
-  getDiscretizedStateKey,
-  getQValues,
-  updateQTable
-} from './utils/trafficEngine';
+  INITIAL_PATIENTS,
+  INITIAL_CAPACITY,
+  INITIAL_AMBULANCES,
+  INITIAL_BLOOD_INVENTORY
+} from './data/initialHemsData';
+import { Download, HeartPulse, ShieldAlert, Siren, Building2 } from 'lucide-react';
 
 export const App: React.FC = () => {
-  // Navigation
-  const [activeTab, setActiveTab] = useState<'sim' | 'theory' | 'code'>('sim');
+  // Navigation State
+  const [activeTab, setActiveTab] = useState<'command' | 'triage' | 'ambulances' | 'mci' | 'resources' | 'protocols'>('command');
 
-  // Simulation State
-  const [isRunning, setIsRunning] = useState<boolean>(true);
-  const [simSpeed, setSimSpeed] = useState<number>(1);
-  const [simTime, setSimTime] = useState<number>(0);
+  // Core Data State
+  const [patients, setPatients] = useState<EmergencyPatient[]>(INITIAL_PATIENTS);
+  const [capacity, setCapacity] = useState<HospitalCapacity>(INITIAL_CAPACITY);
+  const [ambulances, setAmbulances] = useState<AmbulanceUnit[]>(INITIAL_AMBULANCES);
+  const [bloodInventory, setBloodInventory] = useState<BloodInventoryItem[]>(INITIAL_BLOOD_INVENTORY);
 
-  // Controller Settings
-  const [mode, setMode] = useState<ControllerMode>('rl');
-  const [scenario, setScenario] = useState<TrafficScenario>('rush_ns');
-  const [spawnRate, setSpawnRate] = useState<number>(0.045);
-  const [emergencyActive, setEmergencyActive] = useState<boolean>(false);
+  // Active Emergency Code Broadcast State
+  const [activeCode, setActiveCode] = useState<ActiveEmergencyCode | null>(null);
+  const [isMciActive, setIsMciActive] = useState<boolean>(false);
 
-  // Intersection State
-  const [phase, setPhase] = useState<TrafficPhase>('NS_GREEN');
-  const [phaseElapsed, setPhaseElapsed] = useState<number>(0);
-  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  // Modals & Drawers
+  const [selectedPatient, setSelectedPatient] = useState<EmergencyPatient | null>(null);
+  const [showIntakeModal, setShowIntakeModal] = useState<boolean>(false);
+  const [showCodeModal, setShowCodeModal] = useState<boolean>(false);
+  const [audioEnabled, setAudioEnabled] = useState<boolean>(true);
 
-  // RL Hyperparameters
-  const [hyperparams, setHyperparams] = useState<RLHyperparameters>({
-    learningRate: 0.12,
-    discountFactor: 0.95,
-    explorationRate: 0.05,
-    minGreenDuration: 8,
-    yellowDuration: 3,
-    weights: {
-      queuePenalty: 0.5,
-      delayPenalty: 0.15,
-      emergencyBonus: 30.0,
-      switchPenalty: 2.5
-    }
-  });
-
-  // RL Telemetry
-  const [telemetry, setTelemetry] = useState<RLTelemetry>({
-    state: [0, 0, 0, 0, 0, 0],
-    action: 'KEEP',
-    qKeep: 2.5,
-    qSwitch: 0.8,
-    reward: -1.2,
-    rewardBreakdown: {
-      queuePenalty: -0.5,
-      delayPenalty: -0.7,
-      emergencyBonus: 0,
-      switchPenalty: 0
-    },
-    isExploring: false,
-    learningUpdates: 0,
-    tdError: 0.024
-  });
-
-  // Metrics
-  const [metrics, setMetrics] = useState<IntersectionMetrics>({
-    totalVehiclesSpawned: 0,
-    totalVehiclesCleared: 0,
-    currentQueue: { N: 0, S: 0, E: 0, W: 0, total: 0 },
-    avgWaitTime: 9.4,
-    maxWaitTime: 12.0,
-    emergencyClearedCount: 0,
-    emergencyAvgWait: 0,
-    co2EmissionsSavedGrams: 0,
-    throughputPerMin: 18
-  });
-
-  const [history, setHistory] = useState<MetricHistoryPoint[]>([
-    { time: 0, mode: 'rl', avgWaitTime: 12.0, totalQueue: 2, throughput: 15 },
-    { time: 3, mode: 'rl', avgWaitTime: 10.5, totalQueue: 3, throughput: 17 },
-    { time: 6, mode: 'rl', avgWaitTime: 8.8, totalQueue: 2, throughput: 19 }
-  ]);
-
-  // Keep refs for the animation loop to avoid stale closures
-  const stateRef = useRef({
-    isRunning,
-    simSpeed,
-    simTime,
-    mode,
-    scenario,
-    spawnRate,
-    phase,
-    phaseElapsed,
-    vehicles,
-    hyperparams,
-    telemetry,
-    metrics,
-    emergencyActive
-  });
+  // Live Real-Time Clock
+  const [currentTime, setCurrentTime] = useState<string>(
+    new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  );
 
   useEffect(() => {
-    stateRef.current = {
-      isRunning,
-      simSpeed,
-      simTime,
-      mode,
-      scenario,
-      spawnRate,
-      phase,
-      phaseElapsed,
-      vehicles,
-      hyperparams,
-      telemetry,
-      metrics,
-      emergencyActive
-    };
-  }, [
-    isRunning,
-    simSpeed,
-    simTime,
-    mode,
-    scenario,
-    spawnRate,
-    phase,
-    phaseElapsed,
-    vehicles,
-    hyperparams,
-    telemetry,
-    metrics,
-    emergencyActive
-  ]);
-
-  // Handle spawn emergency ambulance
-  const handleSpawnEmergency = useCallback(() => {
-    const curTime = stateRef.current.simTime;
-    const ambulance = createVehicle('N', 'emergency', curTime);
-    setVehicles((prev) => [...prev, ambulance]);
-    setEmergencyActive(true);
-  }, []);
-
-  // Reset simulation
-  const handleReset = useCallback(() => {
-    setVehicles([]);
-    setPhase('NS_GREEN');
-    setPhaseElapsed(0);
-    setSimTime(0);
-    setEmergencyActive(false);
-    setMetrics({
-      totalVehiclesSpawned: 0,
-      totalVehiclesCleared: 0,
-      currentQueue: { N: 0, S: 0, E: 0, W: 0, total: 0 },
-      avgWaitTime: 0,
-      maxWaitTime: 0,
-      emergencyClearedCount: 0,
-      emergencyAvgWait: 0,
-      co2EmissionsSavedGrams: 0,
-      throughputPerMin: 0
-    });
-    setHistory([]);
-  }, []);
-
-  // Update Hyperparameters
-  const handleHyperparamChange = useCallback((updated: Partial<RLHyperparameters>) => {
-    setHyperparams((prev) => ({ ...prev, ...updated }));
-  }, []);
-
-  // Main Simulation Loop
-  useEffect(() => {
-    let animationFrameId: number;
-    let lastTimestamp = performance.now();
-    let historyTimer = 0;
-    let rlDecisionTimer = 0;
-
-    const loop = (currentTimestamp: number) => {
-      const deltaMs = Math.min(100, currentTimestamp - lastTimestamp);
-      lastTimestamp = currentTimestamp;
-
-      const {
-        isRunning: running,
-        simSpeed: speed,
-        mode: currentMode,
-        scenario: currentScenario,
-        spawnRate: currentSpawnRate,
-        hyperparams: hp
-      } = stateRef.current;
-
-      if (running) {
-        const dt = (deltaMs / 1000) * speed;
-        stateRef.current.simTime += dt;
-        stateRef.current.phaseElapsed += dt;
-        historyTimer += dt;
-        rlDecisionTimer += dt;
-
-        let curPhase = stateRef.current.phase;
-        let curPhaseElapsed = stateRef.current.phaseElapsed;
-        let curVehicles = [...stateRef.current.vehicles];
-        let hasEmergencyOnField = curVehicles.some((v) => v.type === 'emergency' && !v.hasCrossed);
-
-        if (!hasEmergencyOnField && stateRef.current.emergencyActive) {
-          setEmergencyActive(false);
-        }
-
-        // 1. Spawning Logic based on Scenario
-        const baseProb = currentSpawnRate * speed * 0.25;
-        let probN = baseProb;
-        let probS = baseProb;
-        let probE = baseProb;
-        let probW = baseProb;
-
-        if (currentScenario === 'rush_ns') {
-          probN = baseProb * 2.8;
-          probS = baseProb * 2.4;
-          probE = baseProb * 0.4;
-          probW = baseProb * 0.4;
-        } else if (currentScenario === 'rush_ew') {
-          probE = baseProb * 2.8;
-          probW = baseProb * 2.4;
-          probN = baseProb * 0.4;
-          probS = baseProb * 0.4;
-        } else if (currentScenario === 'bursts') {
-          const isBurst = Math.sin(stateRef.current.simTime * 0.8) > 0.6;
-          if (isBurst) {
-            probN *= 3.0;
-            probE *= 3.0;
-          }
-        }
-
-        const directions: { dir: Direction; prob: number }[] = [
-          { dir: 'N', prob: probN },
-          { dir: 'S', prob: probS },
-          { dir: 'E', prob: probE },
-          { dir: 'W', prob: probW }
-        ];
-
-        directions.forEach(({ dir, prob }) => {
-          if (Math.random() < prob) {
-            // Check if spawn location is clear
-            const existingInEntry = curVehicles.filter(
-              (v) =>
-                v.direction === dir &&
-                ((dir === 'N' && v.y < 40) ||
-                  (dir === 'S' && v.y > CANVAS_SIZE - 40) ||
-                  (dir === 'E' && v.x > CANVAS_SIZE - 40) ||
-                  (dir === 'W' && v.x < 40))
-            );
-
-            if (existingInEntry.length === 0) {
-              const type = Math.random() < 0.12 ? 'bus' : 'car';
-              curVehicles.push(createVehicle(dir, type, stateRef.current.simTime));
-              stateRef.current.metrics.totalVehiclesSpawned += 1;
-            }
-          }
-        });
-
-        // 2. Traffic Light Phase Transitions
-        const isNsGreen = curPhase === 'NS_GREEN';
-        const isNsYellow = curPhase === 'NS_YELLOW';
-        const isEwGreen = curPhase === 'EW_GREEN';
-        const isEwYellow = curPhase === 'EW_YELLOW';
-
-        // Calculate queue lengths for state representation
-        const queueN = curVehicles.filter(
-          (v) => v.direction === 'N' && !v.hasCrossed && v.speed < 0.8 && v.y < STOP_LINES.N.y
-        ).length;
-        const queueS = curVehicles.filter(
-          (v) => v.direction === 'S' && !v.hasCrossed && v.speed < 0.8 && v.y > STOP_LINES.S.y
-        ).length;
-        const queueE = curVehicles.filter(
-          (v) => v.direction === 'E' && !v.hasCrossed && v.speed < 0.8 && v.x > STOP_LINES.E.x
-        ).length;
-        const queueW = curVehicles.filter(
-          (v) => v.direction === 'W' && !v.hasCrossed && v.speed < 0.8 && v.x < STOP_LINES.W.x
-        ).length;
-        const totalQ = queueN + queueS + queueE + queueW;
-
-        // Controller Switching Decision (Yellow vs Green)
-        if (isNsYellow) {
-          if (curPhaseElapsed >= hp.yellowDuration) {
-            curPhase = 'EW_GREEN';
-            curPhaseElapsed = 0;
-          }
-        } else if (isEwYellow) {
-          if (curPhaseElapsed >= hp.yellowDuration) {
-            curPhase = 'NS_GREEN';
-            curPhaseElapsed = 0;
-          }
-        } else if (isNsGreen || isEwGreen) {
-          let shouldSwitch = false;
-
-          if (currentMode === 'fixed') {
-            // Static Fixed-time controller (25 seconds green)
-            if (curPhaseElapsed >= 25.0) {
-              shouldSwitch = true;
-            }
-          } else if (currentMode === 'actuated') {
-            // Sensor-actuated controller
-            if (curPhaseElapsed >= hp.minGreenDuration) {
-              const activeQ = isNsGreen ? queueN + queueS : queueE + queueW;
-              const opposingQ = isNsGreen ? queueE + queueW : queueN + queueS;
-              if (opposingQ > 2 && (activeQ === 0 || curPhaseElapsed >= 32.0)) {
-                shouldSwitch = true;
-              }
-            }
-          } else if (currentMode === 'rl') {
-            // Reinforcement Learning Agent (Q-Learning / DQN evaluation)
-            if (curPhaseElapsed >= hp.minGreenDuration && rlDecisionTimer >= 0.8) {
-              rlDecisionTimer = 0;
-
-              const stateKey = getDiscretizedStateKey(
-                queueN,
-                queueS,
-                queueE,
-                queueW,
-                curPhase,
-                curPhaseElapsed,
-                hasEmergencyOnField
-              );
-              const [qKeep, qSwitch] = getQValues(stateKey);
-
-              // Epsilon-greedy action
-              const isExploring = Math.random() < hp.explorationRate;
-              const actionChoice: 0 | 1 = isExploring
-                ? Math.random() < 0.5 ? 0 : 1
-                : qKeep >= qSwitch ? 0 : 1;
-
-              // Compute reward components
-              const queuePenalty = -hp.weights.queuePenalty * totalQ;
-              const delaySum = curVehicles.reduce((acc, v) => acc + (v.isWaiting ? (v.waitTime / 10) ** 2 : 0), 0);
-              const delayPenalty = -hp.weights.delayPenalty * delaySum;
-              const emergencyWaiting = curVehicles.some((v) => v.type === 'emergency' && v.isWaiting);
-              const emergencyBonus = emergencyWaiting ? -hp.weights.emergencyBonus : 0;
-              const switchPenalty = actionChoice === 1 ? -hp.weights.switchPenalty : 0;
-              const stepReward = queuePenalty + delayPenalty + emergencyBonus + switchPenalty;
-
-              if (actionChoice === 1) {
-                shouldSwitch = true;
-              }
-
-              // Next hypothetical state
-              const nextStateKey = getDiscretizedStateKey(
-                Math.max(0, queueN - (isNsGreen ? 1 : 0)),
-                Math.max(0, queueS - (isNsGreen ? 1 : 0)),
-                Math.max(0, queueE - (isEwGreen ? 1 : 0)),
-                Math.max(0, queueW - (isEwGreen ? 1 : 0)),
-                actionChoice === 1 ? (isNsGreen ? 'EW_GREEN' : 'NS_GREEN') : curPhase,
-                actionChoice === 1 ? 0 : curPhaseElapsed + 1,
-                hasEmergencyOnField
-              );
-
-              // Bellman update
-              const { tdError } = updateQTable(
-                stateKey,
-                actionChoice,
-                stepReward,
-                nextStateKey,
-                hp.learningRate,
-                hp.discountFactor
-              );
-
-              setTelemetry({
-                state: [queueN, queueS, queueE, queueW, isNsGreen ? 0 : 1, curPhaseElapsed],
-                action: actionChoice === 0 ? 'KEEP' : 'SWITCH',
-                qKeep,
-                qSwitch,
-                reward: stepReward,
-                rewardBreakdown: {
-                  queuePenalty,
-                  delayPenalty,
-                  emergencyBonus,
-                  switchPenalty
-                },
-                isExploring,
-                learningUpdates: stateRef.current.telemetry.learningUpdates + 1,
-                tdError: Math.abs(tdError)
-              });
-            }
-          }
-
-          if (shouldSwitch) {
-            curPhase = isNsGreen ? 'NS_YELLOW' : 'EW_YELLOW';
-            curPhaseElapsed = 0;
-          }
-        }
-
-        // 3. Vehicle Kinematics & Physics Step
-        const activeGreen = curPhase;
-        const clearedThisStep: Vehicle[] = [];
-
-        curVehicles = curVehicles.map((veh) => {
-          let targetSpeed = veh.maxSpeed;
-          let mustStopAtLight = false;
-
-          // Determine distance to stop line
-          const stopLine = STOP_LINES[veh.direction];
-          let distToStop = 999;
-
-          if (veh.direction === 'N') distToStop = stopLine.y - (veh.y + veh.length / 2);
-          else if (veh.direction === 'S') distToStop = (veh.y - veh.length / 2) - stopLine.y;
-          else if (veh.direction === 'E') distToStop = (veh.x - veh.length / 2) - stopLine.x;
-          else if (veh.direction === 'W') distToStop = stopLine.x - (veh.x + veh.length / 2);
-
-          // Check if crossed
-          if (!veh.hasCrossed && distToStop < -5) {
-            veh.hasCrossed = true;
-          }
-
-          // Check red/yellow signal constraint if not crossed yet
-          if (!veh.hasCrossed && distToStop > 0 && distToStop < 160) {
-            if (veh.direction === 'N' || veh.direction === 'S') {
-              if (activeGreen !== 'NS_GREEN') {
-                mustStopAtLight = true;
-              }
-            } else {
-              if (activeGreen !== 'EW_GREEN') {
-                mustStopAtLight = true;
-              }
-            }
-          }
-
-          // Check leading vehicle in same lane
-          const leadVehicles = curVehicles.filter(
-            (other) =>
-              other.id !== veh.id &&
-              other.direction === veh.direction &&
-              ((veh.direction === 'N' && other.y > veh.y) ||
-                (veh.direction === 'S' && other.y < veh.y) ||
-                (veh.direction === 'E' && other.x < veh.x) ||
-                (veh.direction === 'W' && other.x > veh.x))
-          );
-
-          let minDistToLead = 999;
-          leadVehicles.forEach((lead) => {
-            let gap = 999;
-            if (veh.direction === 'N') gap = lead.y - lead.length / 2 - (veh.y + veh.length / 2);
-            else if (veh.direction === 'S') gap = veh.y - veh.length / 2 - (lead.y + lead.length / 2);
-            else if (veh.direction === 'E') gap = veh.x - veh.length / 2 - (lead.x + lead.length / 2);
-            else if (veh.direction === 'W') gap = lead.x - lead.length / 2 - (veh.x + veh.length / 2);
-
-            if (gap > 0 && gap < minDistToLead) {
-              minDistToLead = gap;
-            }
-          });
-
-          // Intelligent Driver Model (Deceleration)
-          if (minDistToLead < 14) {
-            targetSpeed = 0;
-          } else if (minDistToLead < 45) {
-            targetSpeed = Math.min(veh.speed * 0.7, 0.9);
-          } else if (mustStopAtLight) {
-            if (distToStop < 10) {
-              targetSpeed = 0;
-            } else if (distToStop < 50) {
-              targetSpeed = Math.min(veh.speed * 0.8, 1.0);
-            }
-          }
-
-          // Smooth acceleration / deceleration
-          if (veh.speed < targetSpeed) {
-            veh.speed = Math.min(targetSpeed, veh.speed + 0.15 * speed);
-          } else if (veh.speed > targetSpeed) {
-            veh.speed = Math.max(targetSpeed, veh.speed - 0.25 * speed);
-          }
-
-          // Update position
-          const stepDist = veh.speed * speed;
-          if (veh.direction === 'N') veh.y += stepDist;
-          else if (veh.direction === 'S') veh.y -= stepDist;
-          else if (veh.direction === 'E') veh.x -= stepDist;
-          else if (veh.direction === 'W') veh.x += stepDist;
-
-          // Update wait time if stopped
-          if (veh.speed < 0.4 && !veh.hasCrossed) {
-            veh.isWaiting = true;
-            veh.waitTime += dt;
-          } else {
-            veh.isWaiting = false;
-          }
-
-          return veh;
-        });
-
-        // Filter out vehicles that exited the canvas
-        const remainingVehicles: Vehicle[] = [];
-        curVehicles.forEach((v) => {
-          const isOffCanvas =
-            (v.direction === 'N' && v.y > CANVAS_SIZE + 40) ||
-            (v.direction === 'S' && v.y < -40) ||
-            (v.direction === 'E' && v.x < -40) ||
-            (v.direction === 'W' && v.x > CANVAS_SIZE + 40);
-
-          if (isOffCanvas) {
-            clearedThisStep.push(v);
-          } else {
-            remainingVehicles.push(v);
-          }
-        });
-
-        // 4. Update Metrics
-        if (clearedThisStep.length > 0) {
-          const newClearedTotal = stateRef.current.metrics.totalVehiclesCleared + clearedThisStep.length;
-          const waitSumCleared = clearedThisStep.reduce((acc, v) => acc + v.waitTime, 0);
-
-          // Idling fuel saving estimate (2.3g CO2 per idle second saved vs 24.5s baseline)
-          const delaySavedSeconds = Math.max(0, 24.5 * clearedThisStep.length - waitSumCleared);
-          const co2SavedThisBatch = delaySavedSeconds * 2.3;
-
-          stateRef.current.metrics.totalVehiclesCleared = newClearedTotal;
-          stateRef.current.metrics.co2EmissionsSavedGrams += co2SavedThisBatch;
-        }
-
-        // Calculate live average wait time across current vehicles
-        const waitingVehicles = remainingVehicles.filter((v) => v.waitTime > 0);
-        const liveAvgWait =
-          waitingVehicles.length > 0
-            ? waitingVehicles.reduce((acc, v) => acc + v.waitTime, 0) / waitingVehicles.length
-            : 0;
-
-        const liveMaxWait = remainingVehicles.reduce((max, v) => Math.max(max, v.waitTime), 0);
-
-        // Throughput per min estimate
-        const activeMinutes = Math.max(0.2, stateRef.current.simTime / 60);
-        const throughputEstimate = Math.round(stateRef.current.metrics.totalVehiclesCleared / activeMinutes);
-
-        const currentMetrics: IntersectionMetrics = {
-          ...stateRef.current.metrics,
-          currentQueue: {
-            N: queueN,
-            S: queueS,
-            E: queueE,
-            W: queueW,
-            total: totalQ
-          },
-          avgWaitTime: liveAvgWait > 0 ? liveAvgWait : stateRef.current.metrics.avgWaitTime,
-          maxWaitTime: liveMaxWait,
-          throughputPerMin: throughputEstimate
-        };
-
-        // 5. Update History every 2.5 seconds
-        if (historyTimer >= 2.5) {
-          historyTimer = 0;
-          setHistory((prev) => {
-            const next = [
-              ...prev,
-              {
-                time: Math.round(stateRef.current.simTime),
-                mode: currentMode,
-                avgWaitTime: currentMetrics.avgWaitTime,
-                totalQueue: totalQ,
-                throughput: throughputEstimate
-              }
-            ];
-            return next.slice(-20); // Keep last 20 samples
-          });
-        }
-
-        // Commit updates to React state
-        setPhase(curPhase);
-        setPhaseElapsed(curPhaseElapsed);
-        setVehicles(remainingVehicles);
-        setSimTime(stateRef.current.simTime);
-        setMetrics(currentMetrics);
+    const timer = setInterval(() => {
+      setCurrentTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      
+      // Increment active code timer
+      if (activeCode) {
+        setActiveCode((prev) => (prev ? { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 } : null));
       }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [activeCode]);
 
-      animationFrameId = requestAnimationFrame(loop);
-    };
-
-    animationFrameId = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animationFrameId);
+  // Periodic Ambulance ETA countdown
+  useEffect(() => {
+    const etaInterval = setInterval(() => {
+      setAmbulances((prev) =>
+        prev.map((amb) => {
+          if (amb.etaMinutes > 1) {
+            return { ...amb, etaMinutes: amb.etaMinutes - 1 };
+          }
+          return amb;
+        })
+      );
+    }, 45000);
+    return () => clearInterval(etaInterval);
   }, []);
+
+  // Handlers
+  const handleAddPatient = (newPatient: EmergencyPatient) => {
+    setPatients((prev) => [newPatient, ...prev]);
+
+    // Update capacity counters
+    if (newPatient.location.includes('Trauma Bay')) {
+      setCapacity((prev) => ({
+        ...prev,
+        traumaBays: { ...prev.traumaBays, occupied: Math.min(prev.traumaBays.total, prev.traumaBays.occupied + 1) }
+      }));
+    } else if (newPatient.location.includes('Acute Bed')) {
+      setCapacity((prev) => ({
+        ...prev,
+        edAcuteBeds: { ...prev.edAcuteBeds, occupied: Math.min(prev.edAcuteBeds.total, prev.edAcuteBeds.occupied + 1) }
+      }));
+    }
+  };
+
+  const handleUpdatePatient = (patientId: string, updates: Partial<EmergencyPatient>) => {
+    setPatients((prev) =>
+      prev.map((pt) => {
+        if (pt.id === patientId) {
+          const updated = { ...pt, ...updates };
+          if (selectedPatient && selectedPatient.id === patientId) {
+            setSelectedPatient(updated);
+          }
+          return updated;
+        }
+        return pt;
+      })
+    );
+  };
+
+  const handleUpdateBloodUnits = (bloodType: string, delta: number) => {
+    setBloodInventory((prev) =>
+      prev.map((item) => {
+        if (item.type === bloodType) {
+          const newUnits = Math.max(0, item.units + delta);
+          return {
+            ...item,
+            units: newUnits,
+            status: newUnits <= item.minSafeReserve ? 'Critical' : 'Normal'
+          };
+        }
+        return item;
+      })
+    );
+  };
+
+  const handleDispenseMtpPack = () => {
+    handleUpdateBloodUnits('O Negative (Universal RBC)', -6);
+    handleUpdateBloodUnits('Fresh Frozen Plasma (FFP)', -6);
+    handleUpdateBloodUnits('Platelet Pheresis Packs', -1);
+
+    // Also declare MTP Alert if not active
+    if (!activeCode) {
+      setActiveCode({
+        code: 'MTP_ALERT',
+        title: 'MTP ALERT: Massive Transfusion Protocol Dispensed',
+        location: 'Trauma Bay 2 / Blood Bank Rapid Infuser',
+        declaredAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        elapsedSeconds: 0,
+        respondingTeam: 'Trauma Surgery & Blood Bank Rapid Delivery',
+        checklist: [
+          { item: 'MTP Cooler #1 (6 PRBC : 6 FFP : 1 Plt) released to Trauma Bay', completed: true },
+          { item: 'Rapid blood warmer set to 37°C and pressure infusor attached', completed: true },
+          { item: 'Tranexamic Acid (TXA) 1g IV loading dose administered', completed: false },
+          { item: 'Check ionized Calcium and transfuse 2g Calcium Gluconate IV', completed: false }
+        ]
+      });
+    }
+  };
+
+  const handleUpdateVentilators = (delta: number) => {
+    setCapacity((prev) => ({
+      ...prev,
+      ventilators: {
+        ...prev.ventilators,
+        inUse: Math.max(0, Math.min(prev.ventilators.total, prev.ventilators.inUse + delta))
+      }
+    }));
+  };
+
+  const handleTriggerMciSurge = (incidentName: string, victimCount: number) => {
+    setIsMciActive(true);
+    setCapacity((prev) => ({
+      ...prev,
+      hospitalCondition: 'RED',
+      traumaBays: { ...prev.traumaBays, occupied: 6 }
+    }));
+
+    // Generate batch of MCI disaster patients
+    const mciNames = ['MCI Victim Alpha-1', 'MCI Victim Alpha-2', 'MCI Victim Bravo-1', 'MCI Victim Bravo-2', 'MCI Victim Charlie-1', 'MCI Victim Charlie-2'];
+    const generated: EmergencyPatient[] = mciNames.map((name, idx) => {
+      const esiLevel: EsiLevel = idx % 2 === 0 ? 1 : 2;
+      return {
+        id: `mci-${Date.now()}-${idx}`,
+        mrn: `MCI-${890000 + idx}`,
+        name: `${name} (${incidentName})`,
+        age: 20 + Math.floor(Math.random() * 45),
+        gender: idx % 2 === 0 ? 'Male' : 'Female',
+        arrivalTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        minutesInEd: 0,
+        esiLevel,
+        chiefComplaint: `MCI Blast & Extrication Trauma from ${incidentName}`,
+        primaryDiagnosis: 'Multiple blunt polytrauma, blast contusion',
+        location: esiLevel === 1 ? 'Trauma Bay 3' : 'Acute Bed 2',
+        status: 'Immediate Resuscitation',
+        vitals: {
+          heartRate: 120 + Math.floor(Math.random() * 25),
+          bloodPressureSystolic: 80 + Math.floor(Math.random() * 30),
+          bloodPressureDiastolic: 50 + Math.floor(Math.random() * 20),
+          oxygenSaturation: 89 + Math.floor(Math.random() * 8),
+          respiratoryRate: 28,
+          temperatureCelsius: 36.4,
+          glasgowComaScale: 11
+        },
+        attendingPhysician: 'Disaster Surge Surgical Team',
+        primaryNurse: 'Disaster Triage Station',
+        isAllergic: false,
+        activeProtocols: ['MCI START Protocol Active'],
+        notes: [`Disaster triage intake registered at ED ambulance bay.`]
+      };
+    });
+
+    setPatients((prev) => [...generated, ...prev]);
+
+    // Trigger Code Orange banner
+    setActiveCode({
+      code: 'CODE_ORANGE',
+      title: `CODE ORANGE: ${incidentName} (${victimCount} Victims)`,
+      location: 'Regional Emergency Operations Center & Triage Bay',
+      declaredAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      elapsedSeconds: 0,
+      respondingTeam: 'Hospital Incident Command System (HICS) & Off-Duty Recall',
+      checklist: [
+        { item: 'HICS Emergency Operations Center (EOC) activated', completed: true },
+        { item: 'START Field Triage Station deployed at ambulance gate', completed: true },
+        { item: 'Elective surgeries cancelled & PACU converted to surge beds', completed: false },
+        { item: 'Blood Bank switched to Emergency Uncrossed O-Neg protocol', completed: false },
+        { item: 'Off-duty trauma surgeons and anesthesiologists recalled', completed: false }
+      ]
+    });
+  };
+
+  const handleClearMci = () => {
+    setIsMciActive(false);
+    setCapacity((prev) => ({ ...prev, hospitalCondition: 'AMBER' }));
+    if (activeCode?.code === 'CODE_ORANGE') {
+      setActiveCode(null);
+    }
+  };
+
+  const handleDeclareCode = (code: ActiveEmergencyCode) => {
+    setActiveCode(code);
+  };
+
+  const handleClearCode = () => {
+    setActiveCode(null);
+  };
+
+  const handleToggleChecklistItem = (index: number) => {
+    if (!activeCode) return;
+    const updated = [...activeCode.checklist];
+    updated[index].completed = !updated[index].completed;
+    setActiveCode({ ...activeCode, checklist: updated });
+  };
+
+  const handleDivertAmbulance = (ambId: string) => {
+    setAmbulances((prev) => prev.filter((a) => a.id !== ambId));
+  };
+
+  const handleAssignBay = (ambId: string, bay: string) => {
+    setAmbulances((prev) =>
+      prev.map((a) => (a.id === ambId ? { ...a, assignedBay: bay } : a))
+    );
+  };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
-      {/* Top Navbar */}
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-rose-500/30 selection:text-rose-200">
+      {/* Top Clinical Command Navigation */}
       <Header
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        mode={mode}
-        totalCleared={metrics.totalVehiclesCleared}
-        simTime={simTime}
+        capacity={capacity}
+        activeCode={activeCode?.code || 'NONE'}
+        onOpenCodeModal={() => setShowCodeModal(true)}
+        audioEnabled={audioEnabled}
+        onToggleAudio={() => setAudioEnabled((prev) => !prev)}
+        currentTime={currentTime}
+      />
+
+      {/* Emergency Active Code Broadcast Banner */}
+      <EmergencyCodeBanner
+        activeCode={activeCode}
+        onToggleChecklistItem={handleToggleChecklistItem}
+        onClearCode={handleClearCode}
       />
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Banner Overview / Kicker */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800/80 pb-5">
-          <div>
-            <div className="flex items-center gap-2 text-xs font-mono text-emerald-400 mb-1">
-              <span>DEEP Q-LEARNING</span>
-              <span className="text-slate-700">·</span>
-              <span>MARKOV DECISION PROCESS</span>
-              <span className="text-slate-700">·</span>
-              <span>ADAPTIVE ARTERIAL CONTROL</span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-100 tracking-tight">
-              Reinforcement Learning-Based Smart Traffic Signal Control System
-            </h1>
-            <p className="text-sm text-slate-400 mt-1 max-w-3xl leading-relaxed">
-              Replacing rigid, fixed-time traffic light cycles with an autonomous agent trained to minimize cumulative queue delay, eliminate intersection bottlenecks, and dynamically prioritize emergency vehicles.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3 self-start md:self-auto shrink-0 text-xs font-mono">
-            <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
-              <span className="text-slate-500 block text-[10px]">THROUGHPUT</span>
-              <strong className="text-emerald-400 text-sm">{metrics.throughputPerMin}</strong> cars/min
-            </div>
-            <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
-              <span className="text-slate-500 block text-[10px]">CO₂ AVOIDED</span>
-              <strong className="text-emerald-400 text-sm">{(metrics.co2EmissionsSavedGrams / 1000).toFixed(2)}</strong> kg
-            </div>
-          </div>
-        </div>
-
-        {/* Tab 1: Simulator & Telemetry Hub */}
-        {activeTab === 'sim' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Left Column: 2D Interactive Canvas Intersection */}
-              <div className="lg:col-span-7 flex flex-col items-center">
-                <TrafficCanvas
-                  vehicles={vehicles}
-                  phase={phase}
-                  phaseElapsed={phaseElapsed}
-                  queueCounts={metrics.currentQueue}
-                  emergencyActive={emergencyActive}
-                />
-              </div>
-
-              {/* Right Column: Controller Panel & Telemetry */}
-              <div className="lg:col-span-5 space-y-5">
-                <ControllerPanel
-                  isRunning={isRunning}
-                  onTogglePlay={() => setIsRunning((prev) => !prev)}
-                  onReset={handleReset}
-                  simSpeed={simSpeed}
-                  onSpeedChange={setSimSpeed}
-                  mode={mode}
-                  onModeChange={setMode}
-                  scenario={scenario}
-                  onScenarioChange={setScenario}
-                  onSpawnEmergency={handleSpawnEmergency}
-                  spawnRate={spawnRate}
-                  onSpawnRateChange={setSpawnRate}
-                  emergencyActive={emergencyActive}
-                />
-
-                <RLAgentTelemetry
-                  telemetry={telemetry}
-                  hyperparams={hyperparams}
-                  onHyperparamChange={handleHyperparamChange}
-                  isRLActive={mode === 'rl'}
-                />
-              </div>
-            </div>
-
-            {/* Performance Benchmarks & Emissions Section */}
-            <PerformanceComparison
-              metrics={metrics}
-              history={history}
-              currentMode={mode}
-            />
-          </div>
+        {/* Operations Hub Tab */}
+        {activeTab === 'command' && (
+          <DashboardOverview
+            patients={patients}
+            capacity={capacity}
+            ambulances={ambulances}
+            bloodInventory={bloodInventory}
+            onSelectPatient={setSelectedPatient}
+            onOpenIntakeModal={() => setShowIntakeModal(true)}
+            onNavigateTab={setActiveTab}
+            onOpenCodeModal={() => setShowCodeModal(true)}
+          />
         )}
 
-        {/* Tab 2: MDP Theory & Mathematical Architecture */}
-        {activeTab === 'theory' && <TheoryAndArchitecture />}
+        {/* Patient Triage & Intake Tab */}
+        {activeTab === 'triage' && (
+          <PatientTriageBoard
+            patients={patients}
+            onSelectPatient={setSelectedPatient}
+            onAddPatient={handleAddPatient}
+            onUpdatePatient={handleUpdatePatient}
+            showIntakeModal={showIntakeModal}
+            onCloseIntakeModal={() => setShowIntakeModal(false)}
+            onOpenIntakeModal={() => setShowIntakeModal(true)}
+          />
+        )}
 
-        {/* Tab 3: PyTorch Implementation Code */}
-        {activeTab === 'code' && <PythonCodeViewer />}
+        {/* Inbound EMS Ambulance Fleet Monitor */}
+        {activeTab === 'ambulances' && (
+          <AmbulanceDispatchMonitor
+            ambulances={ambulances}
+            onAddAmbulance={(amb) => setAmbulances((prev) => [amb, ...prev])}
+            onAssignBay={handleAssignBay}
+            onDivertAmbulance={handleDivertAmbulance}
+          />
+        )}
+
+        {/* Mass Casualty Incident (MCI) & Disaster Operations */}
+        {activeTab === 'mci' && (
+          <DisasterMciModule
+            onTriggerMciSurge={handleTriggerMciSurge}
+            isMciActive={isMciActive}
+            onClearMci={handleClearMci}
+          />
+        )}
+
+        {/* Critical Hospital Resources & Blood Bank */}
+        {activeTab === 'resources' && (
+          <ResourceInventory
+            bloodInventory={bloodInventory}
+            capacity={capacity}
+            onUpdateBloodUnits={handleUpdateBloodUnits}
+            onDispenseMtpPack={handleDispenseMtpPack}
+            onUpdateVentilators={handleUpdateVentilators}
+          />
+        )}
+
+        {/* Clinical Protocols & Emergency SOPs */}
+        {activeTab === 'protocols' && <ClinicalProtocolsView />}
       </main>
+
+      {/* Patient Detail / Clinical Chart Drawer Modal */}
+      {selectedPatient && (
+        <PatientDetailModal
+          patient={selectedPatient}
+          onClose={() => setSelectedPatient(null)}
+          onUpdatePatient={handleUpdatePatient}
+        />
+      )}
+
+      {/* Emergency Code Broadcast Modal */}
+      {showCodeModal && (
+        <EmergencyCodeModal
+          isOpen={showCodeModal}
+          onClose={() => setShowCodeModal(false)}
+          onDeclareCode={handleDeclareCode}
+        />
+      )}
 
       {/* Footer */}
       <footer className="border-t border-slate-900 bg-slate-950 py-6 text-xs text-slate-500 mt-12">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left">
           <div>
             <p className="font-semibold text-slate-400">
-              Reinforcement Learning-Based Smart Traffic Signal Control System (RL-STSC)
+              Hospital Emergency Management System (HEMS) · Emergency Operations Directorate
             </p>
             <p className="text-[11px] text-slate-600 mt-0.5">
-              Built with React 19, TypeScript, 2D Canvas Kinematics, and Bellman Q-Learning Equations.
+              Level-1 Trauma Center Patient Triage (ESI 1-5), Hospital Surge Capacity, and Disaster Incident Command.
             </p>
           </div>
-          <div className="flex items-center gap-4 text-[11px] font-mono text-slate-400">
-            <span>MDP State Space: ℝ⁶</span>
-            <span className="text-slate-700">·</span>
-            <span>Q-Policy: ε-Greedy</span>
-            <span className="text-slate-700">·</span>
-            <span>Reward: Penalized Delay²</span>
+
+          <div className="flex items-center gap-3">
+            <a
+              href="/api/download-hems-zip"
+              download="hems-hospital-emergency-management.zip"
+              className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-rose-400 border border-slate-800 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download HEMS Source ZIP</span>
+            </a>
           </div>
         </div>
       </footer>

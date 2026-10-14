@@ -486,6 +486,35 @@ with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
   }
 });
 
+// API: Download Hospital Emergency Management System (HEMS) project zip
+app.get('/api/download-hems-zip', async (_req: Request, res: Response) => {
+  try {
+    const { execSync } = await import('child_process');
+    execSync(
+      `python3 -c "
+import os, zipfile
+zip_filename = '/tmp/hems-hospital-emergency-management.zip'
+exclude_dirs = {'node_modules', '.git', 'dist', '__pycache__', 'venv'}
+exclude_exts = {'.zip', '.tar.gz', '.pyc'}
+with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    for root, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        for file in files:
+            ext = os.path.splitext(file)[1]
+            if ext in exclude_exts:
+                continue
+            filepath = os.path.join(root, file)
+            arcname = os.path.relpath(filepath, '.')
+            zipf.write(filepath, arcname)
+"`,
+      { cwd: path.resolve(__dirname) }
+    );
+    res.download('/tmp/hems-hospital-emergency-management.zip', 'hems-hospital-emergency-management.zip');
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to create hems zip' });
+  }
+});
+
 // API: Download project archive (tar.gz)
 app.get('/api/download-archive', async (_req: Request, res: Response) => {
   try {
