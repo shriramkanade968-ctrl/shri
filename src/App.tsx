@@ -2,13 +2,15 @@ import React, { useState } from 'react';
 import { FinanceApp } from './components/FinanceApp';
 import { TrafficApp } from './components/TrafficApp';
 import { HemsApp } from './components/HemsApp';
-import { Bot, TrafficCone, Hospital, Sparkles, Download, Layers } from 'lucide-react';
+import { ProjectReportModal } from './components/ProjectReportModal';
+import { Bot, TrafficCone, Hospital, Sparkles, Download, Layers, FileText } from 'lucide-react';
 
 export type ActiveProject = 'finance' | 'traffic' | 'hems';
 
 export const App: React.FC = () => {
   // Default to Personal Finance Advisor Bot
   const [activeProject, setActiveProject] = useState<ActiveProject>('finance');
+  const [showReportModal, setShowReportModal] = useState(false);
 
   const projects = [
     {
@@ -78,6 +80,15 @@ export const App: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2 self-end sm:self-auto">
+            <button
+              onClick={() => setShowReportModal(true)}
+              className="px-2.5 py-1 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+              title="View & Download Comprehensive Project Report"
+            >
+              <FileText className="w-3 h-3 text-emerald-400" />
+              <span>Project Report</span>
+            </button>
+
             <a
               href={currentProj.downloadUrl}
               download={currentProj.filename}
@@ -97,6 +108,12 @@ export const App: React.FC = () => {
         {activeProject === 'traffic' && <TrafficApp />}
         {activeProject === 'hems' && <HemsApp />}
       </div>
+
+      {/* Comprehensive Project Report Modal */}
+      <ProjectReportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+      />
     </div>
   );
 };
