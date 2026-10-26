@@ -169,3 +169,183 @@ export function createVehicle(
     spawnTime: currentTime
   };
 }
+
+export function spawnVehicle(
+  direction: Direction,
+  scenario: TrafficScenario = 'balanced',
+  isEmergency = false
+): Vehicle {
+  let type: VehicleType = 'car';
+  if (isEmergency) {
+    type = 'emergency';
+  } else {
+    const r = Math.random();
+    if (r < 0.15) type = 'bus';
+  }
+  return createVehicle(direction, type, Date.now());
+}
+
+export function updateQValue(
+  stateKey: string,
+  actionIdx: 0 | 1,
+  reward: number,
+  nextStateKey: string,
+  alpha: number,
+  gamma: number
+) {
+  return updateQTable(stateKey, actionIdx, reward, nextStateKey, alpha, gamma);
+}
+
+export function calculateReward(
+  queueN: number,
+  queueS: number,
+  queueE: number,
+  queueW: number,
+  waitTimes: number[],
+  hasEmergency: boolean,
+  switched: boolean
+) {
+  const totalQueue = queueN + queueS + queueE + queueW;
+  const queuePenalty = -1.5 * totalQueue;
+  const avgWait = waitTimes.length > 0 ? waitTimes.reduce((a, b) => a + b, 0) / waitTimes.length : 0;
+  const delayPenalty = -2.0 * avgWait;
+  const emergencyBonus = hasEmergency ? 15.0 : 0;
+  const switchPenalty = switched ? -3.0 : 0;
+
+  const totalReward = queuePenalty + delayPenalty + emergencyBonus + switchPenalty;
+
+  return {
+    totalReward,
+    breakdown: {
+      queuePenalty,
+      delayPenalty,
+      emergencyBonus,
+      switchPenalty
+    }
+  };
+}
+
+export function updateVehiclesStep(
+  vehicles: Vehicle[],
+  phase: TrafficPhase,
+  deltaSec: number
+): { updated: Vehicle[]; passedCount: number; waitTimes: number[] } {
+  const isNsGreen = phase === 'NS_GREEN';
+  const isEwGreen = phase === 'EW_GREEN';
+
+  let passedCount = 0;
+  const waitTimes: number[] = [];
+
+  // Sort vehicles in each direction by distance to stop line so cars ahead block cars behind
+  const sorted = [...vehicles].sort((a, b) => {
+    if (a.direction === 'N') return b.y - a.y;
+    if (a.direction === 'S') return a.y - b.y;
+    if (a.direction === 'E') return a.x - b.x;
+    return b.x - a.x; // W
+  });
+
+  const updated: Vehicle[] = [];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const v = { ...sorted[i] };
+    const canMoveThrough =
+      v.hasCrossed ||
+      (v.direction === 'N' && isNsGreen) ||
+      (v.direction === 'S' && isNsGreen) ||
+      (v.direction === 'E' && isEwGreen) ||
+      (v.direction === 'W' && isEwGreen);
+
+    let targetSpeed = v.maxSpeed;
+    let shouldStop = false;
+
+    // Check stop line distance
+    if (!canMoveThrough) {
+      if (v.direction === 'N') {
+        const stopY = STOP_LINES.N.y - v.length;
+        if (v.y < stopY && v.y + v.speed * deltaSec * 60 >= stopY) {
+          shouldStop = true;
+          v.y = stopY;
+        } else if (v.y >= stopY - 5 && v.y <= stopY + 5) {
+          shouldStop = true;
+        }
+      } else if (v.direction === 'S') {
+        const stopY = STOP_LINES.S.y;
+        if (v.y > stopY && v.y - v.speed * deltaSec * 60 <= stopY) {
+          shouldStop = true;
+          v.y = stopY;
+        } else if (v.y >= stopY - 5 && v.y <= stopY + 5) {
+          shouldStop = true;
+        }
+      } else if (v.direction === 'E') {
+        const stopX = STOP_LINES.E.x;
+        if (v.x > stopX && v.x - v.speed * deltaSec * 60 <= stopX) {
+          shouldStop = true;
+          v.x = stopX;
+        } else if (v.x >= stopX - 5 && v.x <= stopX + 5) {
+          shouldStop = true;
+        }
+      } else if (v.direction === 'W') {
+        const stopX = STOP_LINES.W.x - v.length;
+        if (v.x < stopX && v.x + v.speed * deltaSec * 60 >= stopX) {
+          shouldStop = true;
+          v.x = stopX;
+        } else if (v.x >= stopX - 5 && v.x <= stopX + 5) {
+          shouldStop = true;
+        }
+      }
+    }
+
+    // Check car ahead in same lane
+    const ahead = updated.find((other) => {
+      if (other.direction !== v.direction) return false;
+      if (v.direction === 'N') return other.y > v.y && other.y - (v.y + v.length) < 18;
+      if (v.direction === 'S') return other.y < v.y && v.y - (other.y + other.length) < 18;
+      if (v.direction === 'E') return other.x < v.x && v.x - (other.x + other.length) < 18;
+      if (v.direction === 'W') return other.x > v.x && other.x - (v.x + v.length) < 18;
+      return false;
+    });
+
+    if (ahead) {
+      shouldStop = true;
+    }
+
+    if (shouldStop) {
+      v.speed = 0;
+      v.isWaiting = true;
+      v.waitTime += deltaSec;
+    } else {
+      v.speed = targetSpeed;
+      v.isWaiting = false;
+
+      // Advance coordinate
+      const step = v.speed * deltaSec * 60;
+      if (v.direction === 'N') {
+        v.y += step;
+        if (v.y > STOP_LINES.N.y) v.hasCrossed = true;
+      } else if (v.direction === 'S') {
+        v.y -= step;
+        if (v.y < STOP_LINES.S.y) v.hasCrossed = true;
+      } else if (v.direction === 'E') {
+        v.x -= step;
+        if (v.x < STOP_LINES.E.x) v.hasCrossed = true;
+      } else if (v.direction === 'W') {
+        v.x += step;
+        if (v.x > STOP_LINES.W.x) v.hasCrossed = true;
+      }
+    }
+
+    // Check if vehicle has cleared intersection bounds
+    const isOut =
+      v.x < -80 || v.x > CANVAS_SIZE + 80 || v.y < -80 || v.y > CANVAS_SIZE + 80;
+
+    if (isOut) {
+      passedCount++;
+      waitTimes.push(v.waitTime);
+    } else {
+      updated.push(v);
+    }
+  }
+
+  return { updated, passedCount, waitTimes };
+}
+
